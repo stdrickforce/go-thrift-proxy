@@ -54,7 +54,7 @@ func (self *Gateway) process(conn net.Conn, h Handler) error {
 		resp := h.h.Handle(buf)
 		delta := time.Now().UnixNano() - begin
 
-		xlog.Info("[%s][%d] sending response, process time: %dms", remote, delta)
+		xlog.Info("[%s][%d] sending response, process time: %dms", remote, seqid, delta)
 		self.send(resp, conn)
 		xlog.Info("[%s] send response finished", remote)
 	}
