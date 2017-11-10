@@ -2,7 +2,6 @@ package xhandler
 
 import (
 	"io"
-	"xlog"
 )
 
 type Handler interface {
@@ -10,5 +9,4 @@ type Handler interface {
 }
 
 func init() {
-	xlog.Info("xhandler has been initialized.")
 }

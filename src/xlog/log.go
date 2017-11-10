@@ -1,6 +1,9 @@
 package xlog
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 const (
 	DEBUG = (iota - 1) * 10
@@ -22,32 +25,37 @@ type ConsoleLog struct {
 	level int
 }
 
+func (self *ConsoleLog) Log(level, p string, args ...interface{}) {
+	prefix := fmt.Sprintf("[%s][%s]", time.Now().Format("01-02 15:04:05.000"), level)
+	fmt.Printf(prefix+" "+p+"\n", args...)
+}
+
 func (self *ConsoleLog) Debug(p string, args ...interface{}) {
 	if self.level > DEBUG {
 		return
 	}
-	fmt.Printf("[DEBUG] "+p+"\n", args...)
+	self.Log("DEBUG", p, args...)
 }
 
 func (self *ConsoleLog) Info(p string, args ...interface{}) {
 	if self.level > INFO {
 		return
 	}
-	fmt.Printf("[INFO] "+p+"\n", args...)
+	self.Log("INFO", p, args...)
 }
 
 func (self *ConsoleLog) Warning(p string, args ...interface{}) {
 	if self.level > WARNING {
 		return
 	}
-	fmt.Printf("[WARNING] "+p+"\n", args...)
+	self.Log("WARNING", p, args...)
 }
 
 func (self *ConsoleLog) Error(p string, args ...interface{}) {
 	if self.level > ERROR {
 		return
 	}
-	fmt.Printf("[ERROR] "+p+"\n", args...)
+	self.Log("ERROR", p, args...)
 }
 
 func MakeConsoleLog(level int) (log *ConsoleLog) {
