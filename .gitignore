@@ -17,4 +17,5 @@ pkg/
 
 .envrc
 
-tgateway
+toxy
+main

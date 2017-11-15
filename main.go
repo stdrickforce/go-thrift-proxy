@@ -1,15 +1,11 @@
 package main
 
 import (
-	"bytes"
-	"errors"
-	"fmt"
 	"io"
 	"net"
-	"sync"
-	"time"
 	"xhandler"
 	"xlog"
+	"xprocessor"
 	"xprotocol"
 
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
@@ -22,131 +18,132 @@ type Handler struct {
 }
 
 type Gateway struct {
-	registry map[string]Handler
-	wg       sync.WaitGroup
+	socket_addr string
+	http_addr   string
+	processor   xprocessor.Processor
 }
 
-func (self *Gateway) process(conn net.Conn, h Handler) error {
+func (self *Gateway) process(conn net.Conn) {
 	remote := conn.RemoteAddr().String()
+	xlog.Info("[%s] receive connection", remote)
 
 	defer func() {
 		if err := recover(); err != nil {
 			if err != io.EOF {
 				xlog.Info("[%s] unexpected err found: %s", remote, err)
+			} else {
+				xlog.Debug("[%s] connection reset by peer", remote)
 			}
 		}
 		xlog.Info("[%s] connection closed", remote)
-		conn.Close()
 	}()
 
-	var buf = new(bytes.Buffer)
-	var p = xprotocol.NewBinaryProtocol(conn, buf)
-
-	for {
-		xlog.Info("[%s] receiving request header", remote)
-		fname, seqid := self.recv_req_header(p)
-
-		xlog.Info("[%s][%d] receiving request body %s:%s", remote, seqid, h.name, fname)
-		self.recv_req_body(p)
-
-		// TODO timeout
-		begin := time.Now().UnixNano()
-		resp := h.h.Handle(buf)
-		delta := time.Now().UnixNano() - begin
-
-		xlog.Info("[%s][%d] sending response, process time: %dms", remote, seqid, delta)
-		self.send(resp, conn)
-		xlog.Info("[%s] send response finished", remote)
-	}
-
-}
-
-func (self *Gateway) recv_req_header(
-	p *xprotocol.BinaryProtocol,
-) (fname string, seqid int) {
-	_, fname, seqid = p.ReadMessageBegin()
-	return
-}
-
-func (self *Gateway) recv_req_body(
-	p *xprotocol.BinaryProtocol,
-) {
-	p.SkipMessageBody()
-}
-
-func (self *Gateway) send(r io.Reader, w io.Writer) {
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	w.Write(buf.Bytes())
-}
-
-func (self *Gateway) Register(name, addr string, h xhandler.Handler) {
-	self.registry[addr] = Handler{
-		name: name,
-		h:    h,
-	}
+	self.processor.Process(conn)
 }
 
 func (self *Gateway) Serve() {
-	for addr, handler := range self.registry {
-		self.wg.Add(1)
-		go self.run(addr, handler)
-	}
-	self.wg.Wait()
-}
-
-func (self *Gateway) run(addr string, handler Handler) error {
-	// TODO goroutine unexpected exit.
-	defer self.wg.Done()
-
-	xlog.Info("%s gateway is listening on %s...", handler.name, addr)
-	l, err := net.Listen("tcp", addr)
+	l, err := net.Listen("tcp", self.socket_addr)
 	if err != nil {
-		return err
+		panic(err)
 	}
+	xlog.Info("toxy is listening on %s", self.socket_addr)
 
 	for {
-		// accept connection on port
 		conn, err := l.Accept()
-		xlog.Info("[%s] accept connection", conn.RemoteAddr().String())
+		if err != nil {
+			continue
+		}
+		go self.process(conn)
+	}
+}
 
+func (self *Gateway) ServeHttp() {
+}
+
+func (self *Gateway) InitMetric(section *ini.Section) (err error) {
+	return
+}
+
+func (self *Gateway) InitServices(sections []*ini.Section) (err error) {
+	for _, section := range sections {
+		name := section.Name()[8:]
+
+		handler, err := xhandler.NewHandler(section)
 		if err != nil {
 			return err
 		}
-		go self.process(conn, handler)
+
+		err = self.processor.Add(name, handler)
+		if err != nil {
+			return err
+		}
 	}
+	return
+}
+
+func (self *Gateway) InitProcessor(section *ini.Section) (err error) {
+	if section.HasKey("addr") {
+		self.socket_addr = section.Key("addr").String()
+	} else {
+		self.socket_addr = "0.0.0.0:6000"
+	}
+
+	ptype := "default"
+	if section.HasKey("processor") {
+		ptype = section.Key("processor").String()
+	}
+
+	// TODO multiple protocol support
+	pf := xprotocol.TBinaryProtocolFactory
+	switch ptype {
+	case "single":
+		self.processor = xprocessor.NewProcessor(pf)
+	case "multiplexed":
+		self.processor = xprocessor.NewMultiplexedProcessor(pf)
+	default:
+		panic("processor type must be one of: [single, multiplexed]")
+	}
+	return
 }
 
 func (self *Gateway) LoadConfig(filepath string) (err error) {
-	cfg, err := ini.Load(filepath)
-	if err != nil {
+	var f *ini.File
+	var section *ini.Section
+
+	// load config file
+	if f, err = ini.Load(filepath); err != nil {
+		return err
+	}
+
+	// initialize metric client
+	if section, err = f.GetSection("metric"); err != nil {
+		return
+	}
+	if err = self.InitMetric(section); err != nil {
 		return
 	}
 
-	for _, section := range cfg.ChildSections("service") {
-		type_ := section.Key("type").String()
-		switch type_ {
-		case "http":
-			self.Register(
-				section.Name()[8:],
-				section.Key("addr").String(),
-				xhandler.NewHttpHandler(
-					section.Key("uri").String(),
-				),
-			)
-		default:
-			return errors.New(
-				fmt.Sprintf("handler type mismatch: %s", type_),
-			)
-		}
+	// initialize socketserver & processor
+	if section, err = f.GetSection("socketserver"); err != nil {
+		return
+	}
+	if err = self.InitProcessor(section); err != nil {
+		return
+	}
+
+	// TODO httpserver.
+
+	// TODO downgrade.
+
+	// initialize backend services.
+	if err = self.InitServices(f.ChildSections("service")); err != nil {
+		return
 	}
 	return
 }
 
 func MakeGateway() *Gateway {
-	return &Gateway{
-		registry: make(map[string]Handler),
-	}
+	return &Gateway{}
 }
 
 var (
@@ -154,9 +151,9 @@ var (
 )
 
 func main() {
-	kingpin.Parse()
+	// kingpin.Parse()
 	var gateway = MakeGateway()
-	if err := gateway.LoadConfig(*config); err != nil {
+	if err := gateway.LoadConfig("toxy.ini"); err != nil {
 		panic(err)
 	}
 	gateway.Serve()
